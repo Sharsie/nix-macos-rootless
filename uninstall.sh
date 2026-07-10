@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+echo "This UN-installation script removes rootless single-user MacOS installation provided by the install.sh script."
+echo "  It will remove all configuration in '$HOME/.local/share/nix'."
+echo "  It will remove any directories and file beginning with '$HOME/.nix-'."
+echo "  It is opinionated and does not provide adjusting the location of the store."
+echo "  It is provided as is and there may be unknown quirks."
+echo
+read -p "Continue, accepting the above? Press any key to confirm, or CTRL-C to quit." < /dev/tty
+
+remove_nix_dir() {
+    echo "Removing $1 ..."
+    chmod -R u+w "$1" > /dev/null 2>&1  || true
+    rm -rf "$1"
+}
+
+remove_nix_dir "$HOME/.local/share/nix"
+remove_nix_dir "$HOME/.local/state/nix"
+remove_nix_dir "$HOME/.cache/nix"
+
+echo "Removing $HOME/.nix-* ..."
+
+chmod -R u+w "$HOME"/.nix-* > /dev/null 2>&1 || true
+rm -rf "$HOME"/.nix-*

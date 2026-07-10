@@ -52,7 +52,7 @@ git clone --depth 1 --branch hotfix/rootless-nix-install https://github.com/Shar
 
 echo "Building fakedir ..."
 
-make -C fakedir > /dev/null
+make -C fakedir > /dev/null 2>&1
 cp fakedir/libfakedir.dylib "$NIX_INSTALL_DIR"
 
 
@@ -67,8 +67,8 @@ rewrite_libiconv() {
     find "$NIX_INSTALL_DIR/store" -name '*.dylib' -type f  | while read -r f; do
     file "$f" | grep -q Mach-O || continue
     if otool -L "$f" 2>/dev/null | grep -qF "$old"; then
-        install_name_tool -change "$old" "$new" "$f"
-        codesign -f -s - "$f"
+        install_name_tool -change "$old" "$new" "$f" > /dev/null
+        codesign -f -s - "$f" > /dev/null
         echo "  Rewrote: $f"
     fi
     done
@@ -107,6 +107,8 @@ patch_install() {
     echo "  Keeping logical /nix/store paths for nix command arguments"
     sed -i '' 's|-i "\$nix"|-i "/nix${nix#"$FAKEDIR_TARGET"}"|' "$NIX_INSTALL_DIR/install"
     sed -i '' 's|-i "\$cacert"|-i "/nix${cacert#"$FAKEDIR_TARGET"}"|' "$NIX_INSTALL_DIR/install"
+
+    chmod +x "$NIX_INSTALL_DIR/install"
 }
 
 nix_rehash() {
@@ -182,6 +184,9 @@ nix_rehash
 
 echo "==============================="
 echo "Installation complete."
+echo 'Please add the line'
 echo
-echo '!!! Make sure PATH contains the wrapper dir: export PATH="'"$BINDIR"':$PATH"'
+echo 'export PATH="'"$BINDIR"':$PATH"'
+echo
+echo 'to your shell profile (e.g. ~/.profile, ~/.zshrc, ~/.bashrc)'
 echo

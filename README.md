@@ -26,9 +26,15 @@ Requires Xcode Command Line Tools (`xcode-select --install`).
 
 - This is a workaround, not an officially supported Nix install mode.
 - Store location is fixed to `$HOME/.local/share/nix` — not configurable.
-- No uninstaller. To remove: delete `$HOME/.local/share/nix` and drop the
-  `PATH` line. `chmod -R u+w $HOME/.local/share/nix` before deleting.
 - Does not work with MacOS protected binaries. i.e. you can't just `ls /nix/store`
+
+## Uninstallation
+
+Remove the `PATH` line from your shell profile.
+
+```sh
+curl -sL https://raw.githubusercontent.com/Sharsie/nix-macos-rootless/main/uninstall.sh | bash
+```
 
 ## License
 
