@@ -22,11 +22,27 @@ sorcery and installs everything into `$HOME/.local/share/nix`.
 
 Requires Xcode Command Line Tools (`xcode-select --install`).
 
+## Enable flakes
+
+This installer does not enable flakes and nix command by default.
+
+Add the following to `~/.config/nix/nix.conf`
+
+```
+experimental-features = nix-command flakes
+```
+
 ## Caveats
 
 - This is a workaround, not an officially supported Nix install mode.
 - Store location is fixed to `$HOME/.local/share/nix` — not configurable.
-- Does not work with MacOS protected binaries. i.e. you can't just `ls /nix/store`
+- Does not work with MacOS protected binaries. i.e. you can't just `ls /nix/store`. Replace paths, e.g. `ls $HOME/.local/share/nix/store`
+- Every time a global package is installed (`nix-env`) or profile updated (`nix profile`),
+  the wrapper symlinks in `$HOME/.local/share/nix/bin` are regenerated automatically —
+  but only when you invoke those commands through the wrappers (i.e. via the `PATH` entry
+  above). If you mutate the profile any other way (e.g. calling `nix-env` from inside a
+  `nix-shell`), new or removed commands won't be picked up until you run
+  `$HOME/.local/share/nix/libexec/rehash` yourself.
 
 ## Uninstallation
 

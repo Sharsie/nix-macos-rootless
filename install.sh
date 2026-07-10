@@ -127,23 +127,6 @@ patch_install() {
 
 nix_rehash() {
 
-
-    # Resolve a path textually across the logical /nix boundary.
-    resolve() {
-        local p=$1 t
-        local guard=0
-        while t=$(readlink "$p" 2>/dev/null); do
-            case "$t" in
-                /nix/*) p="$HOME/.local/share/nix${t#/nix}" ;;
-                /*)     p="$t" ;;
-                *)      p="$(dirname "$p")/$t" ;;
-            esac
-            guard=$((guard + 1))
-            [ "$guard" -gt 40 ] && break
-        done
-        printf '%s\n' "$p"
-    }
-
     # Install runtime pieces next to the store so wrappers survive this
     # checkout moving away.
     mkdir -p "$LIBEXEC" "$BINDIR"
@@ -152,36 +135,114 @@ nix_rehash() {
         cc -O2 -o "$LIBEXEC/fakedirexec" "$NIX_INSTALL_DIR/fakedirexec.c"
     fi
 
-    profile_bin=$(resolve "$HOME/.nix-profile")/bin
-    profile_bin=$(resolve "$profile_bin")
+    # Standalone rehash script, installed next to the store so it keeps
+    # working after this checkout is gone. It rebuilds $BINDIR wrappers
+    # from whatever is currently in $HOME/.nix-profile/bin. Called here
+    # for the initial install, and by the wrapper dispatcher below after
+    # nix-env / nix profile mutate the profile, so users never have to
+    # run it by hand.
+    cat > "$LIBEXEC/rehash" <<'EOF'
+#!/bin/bash
+set -euo pipefail
 
-    if [ ! -d "$profile_bin" ]; then
-        echo "error: cannot resolve profile bin dir ($profile_bin)" >&2
-        exit 1
-    fi
+LIBEXEC="$HOME/.local/share/nix/libexec"
+BINDIR="$HOME/.local/share/nix/bin"
+
+# Resolve a path textually across the logical /nix boundary.
+resolve() {
+    local p=$1 t
+    local guard=0
+    while t=$(readlink "$p" 2>/dev/null); do
+        case "$t" in
+            /nix/*) p="$HOME/.local/share/nix${t#/nix}" ;;
+            /*)     p="$t" ;;
+            *)      p="$(dirname "$p")/$t" ;;
+        esac
+        guard=$((guard + 1))
+        [ "$guard" -gt 40 ] && break
+    done
+    printf '%s\n' "$p"
+}
+
+profile_bin=$(resolve "$HOME/.nix-profile")/bin
+profile_bin=$(resolve "$profile_bin")
+
+if [ ! -d "$profile_bin" ]; then
+    echo "error: cannot resolve profile bin dir ($profile_bin)" >&2
+    exit 1
+fi
+
+# Enumerate profile binaries BEFORE touching $BINDIR, so a failed
+# enumeration is a no-op instead of wiping every wrapper. Profile entries
+# are symlinks to logical /nix/store/... targets, which this (protected,
+# non-injected) shell cannot resolve — so a dangling-looking symlink is the
+# NORMAL case here. -L must count as present; only skip entries that are
+# neither a symlink nor a real file.
+names=()
+for f in "$profile_bin"/*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    names+=("$(basename "$f")")
+done
+
+if [ "${#names[@]}" -eq 0 ]; then
+    echo "error: no binaries found in $profile_bin; leaving existing wrappers untouched" >&2
+    exit 1
+fi
+
+# Clear stale wrappers, then link one per profile binary.
+find "$BINDIR" -maxdepth 1 -type l -delete
+for name in "${names[@]}"; do
+    ln -sf "$LIBEXEC/wrapper" "$BINDIR/$name"
+done
+
+echo "  Generated ${#names[@]} wrappers in $BINDIR"
+EOF
+    chmod +x "$LIBEXEC/rehash"
 
     # Wrapper template: one dispatcher, invoked under each command's name.
+    # It runs the real binary (rather than exec-replacing itself, which
+    # would leave no shell around to run anything afterward) so an EXIT
+    # trap can trigger a rehash for the two entry points that mutate
+    # $HOME/.nix-profile: `nix-env` and `nix profile`. This is what makes
+    # newly (un)installed packages usable without the user re-running
+    # rehash manually. The trap runs on every exit path (normal or
+    # signalled) and bash preserves the pre-trap exit status automatically,
+    # so there's no manual status-capturing to get wrong.
+    #
+    # Kept on #!/bin/bash (a fixed absolute path) rather than
+    # #!/usr/bin/env bash on purpose: if the nix profile ever provides its
+    # own "bash" (e.g. `nix-env -i bash`), $BINDIR/bash is a symlink to
+    # this very wrapper, and $BINDIR sits ahead of /bin on PATH. `env`
+    # resolves its argument via PATH at exec time, so it would find that
+    # wrapper before the real bash and recurse into itself.
     cat > "$LIBEXEC/wrapper" <<'EOF'
 #!/bin/bash
 export FAKEDIR_PATTERN=/nix
 export FAKEDIR_TARGET="${FAKEDIR_TARGET:-$HOME/.local/share/nix}"
 export DYLD_INSERT_LIBRARIES="$FAKEDIR_TARGET/libexec/libfakedir.dylib"
 export NIX_SSL_CERT_FILE="${NIX_SSL_CERT_FILE:-$HOME/.nix-profile/etc/ssl/certs/ca-bundle.crt}"
-exec "$FAKEDIR_TARGET/libexec/fakedirexec" "$HOME/.nix-profile/bin/$(basename "$0")" "$@"
+
+name=$(basename "$0")
+
+# Inline trap body (not a function) so "$*" here is still the wrapper's own
+# argument list, not a fresh, empty positional-parameter scope. For `nix`,
+# match "profile" anywhere in the args rather than requiring it to be $1:
+# global flags may precede the subcommand (nix --some-flag profile install),
+# and a spurious rehash on a false match is idempotent and harmless.
+# Silence rehash stdout only — if it ever errors, that must reach the user,
+# not vanish (a silent rehash failure once wiped every wrapper invisibly).
+trap '
+    case "$name" in
+        nix-env) "$FAKEDIR_TARGET/libexec/rehash" > /dev/null ;;
+        nix)     case " $* " in *" profile "*) "$FAKEDIR_TARGET/libexec/rehash" > /dev/null ;; esac ;;
+    esac
+' EXIT
+
+"$FAKEDIR_TARGET/libexec/fakedirexec" "$HOME/.nix-profile/bin/$name" "$@"
 EOF
     chmod +x "$LIBEXEC/wrapper"
 
-    # Clear stale wrappers, then link one per profile binary.
-    find "$BINDIR" -maxdepth 1 -type l -delete
-    count=0
-    for f in "$profile_bin"/*; do
-        name=$(basename "$f")
-        ln -sf "$LIBEXEC/wrapper" "$BINDIR/$name"
-        count=$((count + 1))
-    done
-
-    echo "  Generated $count wrappers in $BINDIR"
-
+    "$LIBEXEC/rehash"
 }
 
 echo "Rewriting libiconv libraries in the downloaded nix store to allow installation to proceed ..."

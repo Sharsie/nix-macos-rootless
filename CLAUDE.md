@@ -64,10 +64,13 @@ binaries (`/bin/sh`, `/usr/bin/*`, …), but **non-protected** binaries
   profile would block the redirected paths.
 - **Wrappers resolve through `~/.nix-profile` at invocation time**, so
   package *upgrades* need nothing, but *new/removed* binaries need the
-  name-sync loop re-run (the `nix_rehash` function in install.sh — it only
-  links `$BINDIR/<name> → dispatcher` per profile binary). Making this
-  automatic (self-rehash after mutating `nix-env`/`nix` commands, or
-  interposing `symlink()` to write real targets) is a known open TODO.
+  name-sync re-run (`$LIBEXEC/rehash` — it only links
+  `$BINDIR/<name> → dispatcher` per profile binary). The wrapper
+  dispatcher's EXIT trap does this automatically after `nix-env` and after
+  `nix` with `profile` anywhere in the args (over-matching is fine — rehash
+  is idempotent), but only when invoked *through the wrappers*; profile
+  mutations from elsewhere (e.g. inside a `nix-shell`) need a manual
+  `rehash`.
 - **Bootstrap vs runtime:** the libiconv rewrite + `dyld.source` fallback
   list exist *only* because the nix `install` script execs store nix
   binaries from a non-injected bash — nix's own dylibs need a static
@@ -79,6 +82,14 @@ binaries (`/bin/sh`, `/usr/bin/*`, …), but **non-protected** binaries
   `*-libiconv-<version>` string needs updating when bumping
   `NIX_INSTALL_VERSION`. `dyld.source` reuses the `libiconv.g.dylib` marker
   install.sh creates rather than re-detecting.
+- **In protected shells, symlinks into `/nix` always look dangling.**
+  `[ -e ]`, `[ -x ]`, `[ -d ]` follow symlinks, so on a profile entry
+  (`hello → /nix/store/…/bin/hello`) they return false in any non-injected
+  script — that's the normal case, not corruption. Test `[ -L ]` (or map the
+  target textually) instead. The rehash script once used `[ -e ]` as a
+  dangling-link filter and, having already cleared `$BINDIR`, deleted every
+  wrapper while regenerating zero. Corollary: scripts that rebuild state
+  must enumerate *before* they delete, so failure is a no-op.
 - **The store is read-only.** Any cleanup needs
   `chmod -R u+w ~/.local/share/nix` before `rm -rf`.
 
@@ -145,8 +156,8 @@ Verification checklist (all were green as of 2026-07-10, nix 2.34.8,
 aarch64-darwin):
 
 - install completes with no errors, `nix --version` via wrapper works
-- binary cache substitution: `nix-env -iA nixpkgs.hello` (+ re-run the
-  rehash/name-sync) → `hello` prints
+- binary cache substitution: `nix-env -iA nixpkgs.hello` (auto-rehash via
+  the wrapper trap, no manual step) → `hello` prints
 - `nix-shell -p hello --run hello`
 - a local `nix-build` (store-binary builder; and one with
   `builder = "/bin/sh"` to cover the redirect)
@@ -159,7 +170,9 @@ aarch64-darwin):
 - Protected system binaries never see `/nix` (no `ls /nix/store` from a
   plain shell). Working as intended.
 - Store location fixed to `$HOME/.local/share/nix`.
-- Wrapper name-sync after profile changes is manual until auto-rehash lands.
+- Wrapper name-sync is automatic only for `nix-env`/`nix profile` run
+  through the wrappers; other profile mutations need a manual
+  `$LIBEXEC/rehash`.
 - Go toolchain DYLD handling unresolved (see rejected cherry-pick above) —
   revisit with a tighter heuristic when building Go packages matters.
 - Fallbacks if fakedir ever hits a wall: build nix from source with
