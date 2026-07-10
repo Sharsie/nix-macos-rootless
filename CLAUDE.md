@@ -122,6 +122,32 @@ Five root causes, each found the hard way:
    passes it as `$0` and multi-call scripts (our wrapper dispatcher,
    busybox-style tools) dispatch on its basename. Resolve the parent dirs
    only, keep the leaf name.
+6. **Relative `..` must be preserved, not lexically eaten.** The resolver
+   popped `..` from an empty logical buffer, so `openat(fd, "..")` became
+   `openat(fd, ".")`, `chdir("..")` a no-op, `open("../x")` → `open("x")`.
+   Two distinct symptom classes, both first seen building nodejs from
+   source (`nix develop` on a flake whose nixpkgs pin missed the darwin
+   binary cache): (a) gnulib fts (coreutils `chmod -R`, `find`, `du`…)
+   keeps only 4 parent fds and re-opens `".."` beyond that depth, then
+   verifies dev/ino and reports **ENOENT "disinformation"** on mismatch —
+   so any stdenv `unpackPhase` on a >4-deep source tree died with
+   `coreutils: fts_read failed: No such file or directory`; (b) tools
+   ascending with bare `chdir("..")` got silently stuck, nesting every
+   subsequent sibling one level deeper — recognizable as an insane store
+   path concatenating half the tree in DFS order
+   (`…/bin/lib/node_modules/npm/man/man5/man1/man7/…`), which then blew
+   past PATH_MAX and surfaced as nix's `clearing flags of path …: No such
+   file or directory` in `canonicalisePathMetaData`. Leading `..` in
+   relative paths now stays verbatim (it names the fd/cwd parent, which
+   cannot be resolved lexically); absolute `/..` still clamps to `/`.
+   Hardened alongside: internal buffers grew to 4 KiB and overlong
+   rewrites fail via an unresolvable marker path instead of silent
+   PATH_MAX truncation (a truncated path can name a *different existing*
+   file — writes/unlinks would hit the wrong target), and the `/.`-prefix
+   strip now requires `/./` so root dotfiles like `/.vol/...` aren't
+   mangled into relative paths. The path logic lives in fakedir's
+   `pathresolve.c`, unit-testable on Linux with `make check` (27 checks;
+   run it before shipping any resolver change — no macOS needed).
 
 ## Debugging toolbox
 
@@ -161,6 +187,12 @@ aarch64-darwin):
 - `nix-shell -p hello --run hello`
 - a local `nix-build` (store-binary builder; and one with
   `builder = "/bin/sh"` to cover the redirect)
+- a *source* build with a deep tree — small trees hide the fts `..` bug
+  (fakedir bug 6) because gnulib fts only re-opens `".."` beyond 4 levels.
+  Minimal repro inside `nix-shell -p coreutils`:
+  `mkdir -p /tmp/d/1/2/3/4/5/6 && chmod -R u+w /tmp/d` — must not print
+  `fts_read failed`. Full repro: `nix develop` on a flake that compiles
+  nodejs (unpackPhase `chmod -R u+w` over node's source tree).
 - `nix-store --verify` passes (store contents stay byte-identical to a
   rooted install — symlink targets remain logical `/nix/…`, so NAR hashes
   and signatures hold)
