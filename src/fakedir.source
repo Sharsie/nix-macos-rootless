@@ -1,0 +1,8 @@
+SCRIPT_DIR=$(dirname "$(realpath $0)")
+
+export FAKEDIR_PATTERN=/nix
+export FAKEDIR_TARGET="$HOME/.local/share/nix"
+mkdir -p "${FAKEDIR_TARGET}"
+
+# Insert DYLD library
+export DYLD_INSERT_LIBRARIES="${SCRIPT_DIR}/libfakedir.dylib"
