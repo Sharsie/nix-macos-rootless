@@ -74,9 +74,11 @@ binaries (`/bin/sh`, `/usr/bin/*`, …), but **non-protected** binaries
   fallback path exactly once, and the two same-named libiconvs (Apple +
   GNU) collide in a flat leaf-name lookup, so GNU's install name is
   rewritten to `libiconv.g.dylib`. After install, the trampoline path needs
-  neither. Note `*-libiconv-1.18` in install.sh is pinned per nix version —
-  re-check the glob when bumping `NIX_INSTALL_VERSION` (and create the new
-  `nix/<version>` branch).
+  neither. GNU libiconv is identified by content (its dylib embeds `GNU`
+  strings; Apple's stub doesn't) rather than a pinned version glob, so no
+  `*-libiconv-<version>` string needs updating when bumping
+  `NIX_INSTALL_VERSION`. `dyld.source` reuses the `libiconv.g.dylib` marker
+  install.sh creates rather than re-detecting.
 - **The store is read-only.** Any cleanup needs
   `chmod -R u+w ~/.local/share/nix` before `rm -rf`.
 

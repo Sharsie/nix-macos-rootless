@@ -59,10 +59,24 @@ cp fakedir/libfakedir.dylib "$NIX_INSTALL_DIR"
 rewrite_libiconv() {
     # DYLD libraries need to be loaded from all store paths, but contain conflicts
     # libiconv needs both Apple and GNU version, we rewrite GNU .dylib to use a different filename
+    #
+    # The store holds a libiconv-<version> derivation for both GNU libiconv and Apple's
+    # system libiconv stub, and both ship a same-named libiconv.<N>.dylib. GNU's version
+    # number isn't stable across nix versions, so instead of pinning it we detect the GNU
+    # build by content: its dylib embeds "GNU" strings (copyright/version info), Apple's
+    # stub does not.
 
-    gnu_dir=$(cd "$(ls -d "$NIX_INSTALL_DIR"/store/*-libiconv-1.18/lib | head -n 1)" && pwd)
-    old="/nix/${gnu_dir#"$NIX_INSTALL_DIR"/}/libiconv.2.dylib"
-    new="${old%.2.dylib}.g.dylib"
+    gnu_dylib=""
+    for candidate in "$NIX_INSTALL_DIR"/store/*-libiconv-*/lib/libiconv.*.dylib; do
+        [[ -f "$candidate" && ! -L "$candidate" ]] || continue
+        grep -qr GNU "$(dirname $candidate)" 2>/dev/null && { gnu_dylib="$candidate"; break; }
+    done
+
+    [[ -n "$gnu_dylib" ]] || { echo "Could not locate GNU libiconv in the store" >&2; exit 1; }
+
+    gnu_dir=$(cd "$(dirname "$gnu_dylib")" && pwd)
+    old="/nix/${gnu_dylib#"$NIX_INSTALL_DIR"/}"
+    new="/nix/${gnu_dir#"$NIX_INSTALL_DIR"/}/libiconv.g.dylib"
 
     find "$NIX_INSTALL_DIR/store" -name '*.dylib' -type f  | while read -r f; do
     file "$f" | grep -q Mach-O || continue
@@ -73,7 +87,7 @@ rewrite_libiconv() {
     fi
     done
 
-    ln -sf libiconv.2.dylib "$gnu_dir/libiconv.g.dylib"
+    ln -sf "$(basename "$gnu_dylib")" "$gnu_dir/libiconv.g.dylib"
 }
 
 patch_install() {
