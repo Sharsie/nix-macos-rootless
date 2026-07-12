@@ -97,7 +97,7 @@ binaries (`/bin/sh`, `/usr/bin/*`, …), but **non-protected** binaries
 
 The original installer failure (`opening lock file ".../db/big-lock":
 Permission denied`) was *not* missing interposition — injection was active.
-Five root causes, each found the hard way:
+Each root cause found the hard way:
 
 1. **arm64 variadic ABI.** `open`/`openat` take `mode` variadically; on
    Apple arm64 variadic args go on the stack, named args in registers. The
@@ -122,32 +122,149 @@ Five root causes, each found the hard way:
    passes it as `$0` and multi-call scripts (our wrapper dispatcher,
    busybox-style tools) dispatch on its basename. Resolve the parent dirs
    only, keep the leaf name.
-6. **Relative `..` must be preserved, not lexically eaten.** The resolver
-   popped `..` from an empty logical buffer, so `openat(fd, "..")` became
-   `openat(fd, ".")`, `chdir("..")` a no-op, `open("../x")` → `open("x")`.
-   Two distinct symptom classes, both first seen building nodejs from
-   source (`nix develop` on a flake whose nixpkgs pin missed the darwin
-   binary cache): (a) gnulib fts (coreutils `chmod -R`, `find`, `du`…)
-   keeps only 4 parent fds and re-opens `".."` beyond that depth, then
-   verifies dev/ino and reports **ENOENT "disinformation"** on mismatch —
-   so any stdenv `unpackPhase` on a >4-deep source tree died with
-   `coreutils: fts_read failed: No such file or directory`; (b) tools
-   ascending with bare `chdir("..")` got silently stuck, nesting every
-   subsequent sibling one level deeper — recognizable as an insane store
-   path concatenating half the tree in DFS order
-   (`…/bin/lib/node_modules/npm/man/man5/man1/man7/…`), which then blew
-   past PATH_MAX and surfaced as nix's `clearing flags of path …: No such
-   file or directory` in `canonicalisePathMetaData`. Leading `..` in
-   relative paths now stays verbatim (it names the fd/cwd parent, which
-   cannot be resolved lexically); absolute `/..` still clamps to `/`.
-   Hardened alongside: internal buffers grew to 4 KiB and overlong
-   rewrites fail via an unresolvable marker path instead of silent
-   PATH_MAX truncation (a truncated path can name a *different existing*
-   file — writes/unlinks would hit the wrong target), and the `/.`-prefix
-   strip now requires `/./` so root dotfiles like `/.vol/...` aren't
-   mangled into relative paths. The path logic lives in fakedir's
-   `pathresolve.c`, unit-testable on Linux with `make check` (27 checks;
-   run it before shipping any resolver change — no macOS needed).
+6. **Leading `..` in relative paths was eaten by the resolver** —
+   `openat(fd, "..")` opened the same dir, `chdir("..")` was a no-op.
+   Killed gnulib fts (`fts_read failed` on >4-deep trees, breaking
+   `chmod -R` in unpackPhase) and silently *nested* store trees when tools
+   ascended with bare `chdir("..")` (a corrupted
+   `nodejs/bin/lib/node_modules/npm/man/man5/man1/...` path). Leading `..`
+   is now kept verbatim for relative paths; path logic lives in
+   `pathresolve.c` with `make check` unit tests — run them after any
+   resolver change.
+7. **`$DARWIN_EXTSN` symbol variants bypass plain-name interposers.**
+   Anything compiled with `_DARWIN_C_SOURCE` (all of nixpkgs) binds
+   `fopen$DARWIN_EXTSN` / `realpath$DARWIN_EXTSN`, not `fopen`/`realpath`.
+   CPython opens the main script via `fopen$DARWIN_EXTSN`, so
+   `python script.py` got ENOENT on every /nix path while builtin `open()`
+   worked — killed every nodejs configurePhase. `$` can't appear in a C
+   identifier: declare the real symbol via `__asm("_fopen$DARWIN_EXTSN")`
+   and hand-roll the interpose tuple. When hunting this class of bug,
+   `nm -u <binary> | grep '\$'` shows which variants a binary binds.
+8. **AF_UNIX socket paths ride inside `struct sockaddr_un`**, invisible to
+   every path interposer — `nix store gc` couldn't bind
+   `/nix/var/nix/gc-socket/socket`. `bind`/`connect` now rewrite
+   `sun_path` for AF_UNIX addresses under the pattern (hand-rolled, no
+   global lock across the real call — a blocking `connect` must not stall
+   other interposed syscalls; ENAMETOOLONG instead of truncating).
+9. **Paths inside posix_spawn file actions are consumed at spawn time**,
+   after the `posix_spawn` interposer has run — they must be rewritten
+   when *added* (`posix_spawn_file_actions_addchdir_np`/`addopen`). libuv
+   spawns with a `cwd` option this way, i.e. every Node.js
+   `child_process` call passing `cwd` — the chdir hit the real /nix and
+   the spawn died with ENOENT (first symptom: nodejs checkPhase,
+   `test-embedding.js`, `spawnSync` returning no stdio at all).
+10. **`getcwd(NULL, 0)` callers saw the real path.** The interposer's
+    reverse rewrite went through `strlcpy(..., size)`; under the
+    malloc-contract (`buf == NULL`, `size` may be 0) that copies zero
+    bytes, so bash-style callers got the real store prefix as `$PWD`
+    while fixed-buffer callers (python) got the logical one. Rewrite
+    into a fresh allocation for the NULL-buf case.
+11. **`scandir` never hits the `opendir` interposer** (libc-internal
+    calls): Node's `fs.readdir`/`fs.rm -r` (libuv `uv_fs_scandir`) got
+    ENOENT on every /nix path — ~150 nodejs checkPhase failures from
+    this one gap. The real scandir *re-enters* our interposers, so the
+    lock must be dropped across it (getcwd rule). The `mkstemp` family
+    mutates its template in place: resolve parent-only, run the real
+    call on a rewritten copy, map the filled-in result back into the
+    caller's buffer.
+12. **`pathconf` returns `long` and follows symlinks.** Interposed as
+    `int` with parent-only resolve: a dangling-in-the-real-tree link
+    made the real call return −1, which reached 64-bit callers as
+    4294967295 — libuv sizes readlink buffers with it → kernel EINVAL →
+    every `fs.readlink`/`fs.symlink`/`realpath` consumer in Node broke
+    (20 tests from one wrong prototype). When interposing, match the
+    real signature *exactly*; `nm` won't catch return-type mismatches.
+13. **Directory watching (FSEvents) needs dlsym interception.** libuv
+    dlopens CoreServices and calls `FSEventStreamCreate` through a
+    dlsym'd pointer — DYLD interposition can't rebind that. fakedir
+    interposes `dlsym` and returns a shim that rewrites watch paths
+    (logical→real) and wraps the event callback (real→logical, since
+    callers prefix-filter events against the logical path). fakedir
+    must never *link* CF — that would pull CF into every injected
+    process, and CF is not fork-safe.
+14. **`sun_path` is 104 bytes and the real prefix is ~30 bytes longer
+    than `/nix`**, so legal logical socket paths overflow it. `bind`
+    falls back to a short `/tmp/.fakedir-sock-*` socket plus a symlink
+    at the requested path; `connect` to one of *our* bound sockets
+    resolves through that planted symlink to the short `/tmp` name and
+    never overflows. `connect` to any *other* over-long target (a caller
+    probing an arbitrary /nix path — a regular file, a missing path, an
+    unlistened socket) must still reach the kernel so it reports the true
+    error a rooted install would (ENOTSOCK / ENOENT / ECONNREFUSED), not
+    ENAMETOOLONG: plant a short temporary `/tmp/.fakedir-sock-c*` symlink
+    to the real path, connect through it, unlink it (this was the last
+    nodejs checkPhase failure, `test-net-pipe-connect-errors`, connecting
+    to a regular file in a build TMPDIR under /nix). `lstat` reports the
+    bind shim as the socket it leads to (it keys on the link *target*
+    prefix, so the connect shims — which point into /nix — don't trip
+    it). Oversize paths in general (≥ PATH_MAX) still pass through
+    resolution verbatim so the kernel reports ENAMETOOLONG like a rooted
+    install would; `dladdr` reverse-maps `dli_fname` so backtraces show
+    logical paths.
+15. **`my_dlopen` held `_lock` across the real `dlopen`.** It dropped the
+    lock before the `macho_add_dependencies` closure walk, but that walk
+    goes through `my_open`, whose contract is enter-locked / drop only
+    across the blocking real open / *re-lock on exit*. Called unlocked,
+    `my_open` returned with `_lock` held, so the real `dlopen` ran under
+    the lock — and `dlopen` executes the image's initializers, which
+    re-enter our `dlopen` interposer. nix's libtbb initializer dlopens
+    tbbmalloc, whose initializer dlopens again; the inner call blocked
+    forever on the leaked lock. *Every* basic nix command hung at startup
+    (`nix path-info`, `nix build`). Fix: collect the resolved dependency
+    closure under the lock (dedup + record-before-recurse, so cycles
+    terminate), copy it out, release the lock, then `dlopen` each entry
+    plus the target unlocked. Same rule as bugs 4/10/11 — never hold
+    `_lock` across a call that re-enters the interposers, and `dlopen` is
+    the worst offender because its re-entry is the loader running arbitrary
+    initializers.
+16. **The `mkstemp` family resolved templates outside the pattern.**
+    `mkstemp`/`mkostemp`/`mkdtemp` ran `resolve_symlink_parent` on *every*
+    template. On macOS `/tmp` is a symlink to `/private/tmp`, so a non-/nix
+    template like `/tmp/nix-shell.XXXXXX` resolved *longer* than the
+    caller's buffer; the real call then succeeded, but `tmpl_writeback`
+    (which refuses to overflow the caller's `template`) saw the logical
+    result was longer and failed the whole call with ENAMETOOLONG, deleting
+    the just-created file. `nix develop` builds its rc file exactly this way,
+    so entering *any* dev shell died with "creating temporary file
+    '/tmp/nix-shell.XXXXXX': File name too long". Fix: fakedir only rewrites
+    paths under the pattern, so a template not starting with it needs no
+    resolution and no writeback — pass it straight to the real call. (First
+    bug hit *after* the store, in the `nix develop`/`nix run` layer.)
+17. **The `/bin/sh` redirect only searched PATH.** To keep injection alive,
+    fakedir redirects a `/bin/sh` exec to a non-protected sh/bash (a
+    protected `/bin/sh` strips DYLD_* and loses the /nix view). It only
+    looked on PATH, which is fine inside a build/dev-shell (stdenv bash is
+    there) but not for npm/pnpm `.bin/*` shims — `#!/bin/sh` scripts that
+    `exec node`, run with a minimal PATH (a `nix run` wrapper exporting only
+    nodejs/bin + pnpm/bin, no shell). PATH had no sh, the real protected
+    `/bin/sh` ran the shim, `/nix` was invisible, and `exec node` died
+    "node: not found" (exit 127) — `nix run` of a Slidev deck installed fine
+    then failed to launch. A rooted install is immune (real /nix, so even a
+    protected /bin/sh finds the store node). Fix: when PATH yields no shell,
+    scan the store once for any bash and use its `bin/sh` (a store binary
+    keeps injection); returns a logical /nix path so normal rewriting
+    applies. Every `#!/bin/sh`-execs-a-store-binary tool depends on this.
+
+Known flake, not a fakedir bug: stdenv bash on darwin initializes
+CoreFoundation via gettext's `libintl_setlocale` (no `LANG`/`LC_ALL` in
+the build env → it consults CF preferences), and the ENOEXEC fallback
+interprets shebang-less scripts in a *forked* copy of that bash —
+CF-after-fork can SIGSEGV in CFPrefs/os_log (seen once in a nodejs
+configurePhase; the identical phase passed on retry).
+
+Known flake, not a fakedir bug: the nodejs checkPhase's load-sensitive
+sequential tests — `test-cpu-prof-name`, `test-performance-eventloopdelay`
+(and likely other perf/profiler ones) — **time out** (~900 s, SIGTERM /
+exit −15, not an assertion failure) when a CPU core is pinned during the
+run. The usual culprit is **XProtect** (Apple's malware scanner) chewing
+through the thousands of freshly-built store files at ~90 % of a core right
+as checkPhase starts. They pass instantly standalone on an idle machine, so
+this is pure CPU contention, not injection overhead. Diagnosis: a `timeout`
+stack with a ~900 000 ms `duration_ms`; confirm with
+`ps aux | sort -nrk3 | head` (look for `XProtect`/`XprotectService`). Fix:
+just rebuild once the machine is idle. Can't be skipped via `CI_SKIP_TESTS`
+without changing the drv hash (the profile pins the checked output), so the
+build genuinely has to pass these.
 
 ## Debugging toolbox
 
@@ -166,6 +283,18 @@ Five root causes, each found the hard way:
 - `which foo` returning nothing inside a working `nix-shell` is *expected*:
   `/usr/bin/which` is protected and can't see `/nix`. Use the shell
   builtins `command -v` / `type`, which run inside the injected shell.
+- **Replacing `libfakedir.dylib`: `rm` first, then `cp`.** An in-place `cp`
+  over a dylib that running processes have mapped invalidates the cached
+  code signature on that vnode — every subsequently injected process dies
+  with SIGKILL (exit 137) at exec, indistinguishable from library
+  validation. `rm && cp` gives the file a fresh inode; `codesign -f -s -`
+  after building doesn't hurt.
+- `nix-store --verify --check-contents` reports GNU libiconv and its
+  dependents (libunistring, libidn2, libpsl as of 2026-07-10) as
+  "modified": that's install.sh's deliberate bootstrap rewrite to
+  `libiconv.g.dylib` (install name + dependents' load commands), not
+  corruption. Confirm with
+  `otool -L <lib> | grep libiconv.g` before suspecting anything else.
 
 ## Testing a change from zero
 
@@ -187,12 +316,6 @@ aarch64-darwin):
 - `nix-shell -p hello --run hello`
 - a local `nix-build` (store-binary builder; and one with
   `builder = "/bin/sh"` to cover the redirect)
-- a *source* build with a deep tree — small trees hide the fts `..` bug
-  (fakedir bug 6) because gnulib fts only re-opens `".."` beyond 4 levels.
-  Minimal repro inside `nix-shell -p coreutils`:
-  `mkdir -p /tmp/d/1/2/3/4/5/6 && chmod -R u+w /tmp/d` — must not print
-  `fts_read failed`. Full repro: `nix develop` on a flake that compiles
-  nodejs (unpackPhase `chmod -R u+w` over node's source tree).
 - `nix-store --verify` passes (store contents stay byte-identical to a
   rooted install — symlink targets remain logical `/nix/…`, so NAR hashes
   and signatures hold)
