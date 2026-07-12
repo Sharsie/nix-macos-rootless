@@ -32,6 +32,31 @@ Add the following to `~/.config/nix/nix.conf`
 experimental-features = nix-command flakes
 ```
 
+## Upgrading
+
+The installer adds nix (and its CA bundle) to your profile as plain store
+paths, which `nix profile upgrade` can't track. One-time fix (needs flakes,
+see above) — add the flake-based packages *before* removing the old ones, in
+this order (nix needs itself to run, and removing the certs first would break
+SSL for the download that replaces them):
+
+```sh
+nix profile add nixpkgs#nix --priority 4      # shadows the old one (avoids file conflicts)
+nix profile remove nix                        # the entry without a flake origin
+nix profile add nixpkgs#cacert --priority 4
+nix profile remove nss-cacert
+```
+
+From then on, upgrading is just:
+
+```sh
+nix profile upgrade --all
+```
+
+Note: the first mutating `nix profile` command converts the profile to the
+new format — `nix-env` refuses to work with it afterwards. That's a nix
+thing, not this installer's; stick with `nix profile` from then on. It's the right choice.
+
 ## Caveats
 
 - This is a workaround, not an officially supported Nix install mode.
