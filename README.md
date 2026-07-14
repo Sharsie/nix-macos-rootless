@@ -4,8 +4,18 @@ Nix on macOS. No daemon, no `/nix`, no `sudo`. Just you and your `$HOME`.
 
 If you can use sudo, don't use this. Seriously. Do multi-user install using sudo. Not everyone is that lucky.
 
+## One-liner install
+
 ```sh
-curl -sL https://raw.githubusercontent.com/Sharsie/nix-macos-rootless/main/install.sh | bash
+curl -sL https://raw.githubusercontent.com/Sharsie/nix-macos-rootless/main/install | bash
+```
+
+## One-liner uninstall
+
+Remove the `PATH` modifications from your shell profile.
+
+```sh
+curl -sL https://raw.githubusercontent.com/Sharsie/nix-macos-rootless/main/uninstall | bash
 ```
 
 ## ⚠️ Add the wrapper dir to your PATH
@@ -69,13 +79,7 @@ thing, not this installer's; stick with `nix profile` from then on. It's the rig
   `nix-shell`), new or removed commands won't be picked up until you run
   `$HOME/.local/share/nix/libexec/rehash` yourself.
 
-## Uninstallation
 
-Remove the `PATH` line from your shell profile.
-
-```sh
-curl -sL https://raw.githubusercontent.com/Sharsie/nix-macos-rootless/main/uninstall.sh | bash
-```
 
 ## License
 
