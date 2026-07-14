@@ -94,10 +94,48 @@ read -n 1 -s -r -p "Press any key to acknowledge..." < /dev/tty
 cat <<EOF
 
 
-⚠️ 6. ======= Close this terminal =======
+⚠️ 6. ======= Upgrading nix and tooling =======
+
+  To save yourself the trouble a year from now, I recommend you convert current installation of nix and cacert
+  to be tracked by your nix profile as flakes.
+
+  This will enable you to easily upgrade at any point in the future without having to think about it.
+
+  The steps are as follows:
+
+  1. Add nix to your profile. You already have it. But statically installed. This converts it to a profile-managed flake:
+
+  nix profile add nixpkgs#nix --priority 4
+
+  2. Remove the one we installed (yes, the name is the same, don't worry about it):
+
+  nix profile remove nix
+
+  3. Do the same with cacerts:
+
+  nix profile add nixpkgs#cacert --priority 4
+  nix profile remove nss-cacert
+
+
+  Note: This will convert your profile to a new format and will prevent you from using nix-env to manage the environment.
+  This is ok, just do it. Use nix profile from now on.
+
+
+EOF
+read -n 1 -s -r -p "Press any key to acknowledge..." < /dev/tty
+
+cat <<EOF
+
+
+⚠️ 7. ======= Close this terminal =======
 
   You can load all the PATH edits and all that within this session.
   But seriously. Just close the terminal/tab/whatever and spawn a new one.
+
+  If you need to review any of the information provided, go to the GitHub repo and refer to src/mac-rootless-postinstall.sh.
+
+  You can also just rerun this with
+  curl -sL https://raw.githubusercontent.com/Sharsie/nix-macos-rootless/refs/heads/main/src/mac-rootless-postinstall.sh | bash
 
 EOF
 read -p "Press Enter to get rid of this annoyance..." < /dev/tty
