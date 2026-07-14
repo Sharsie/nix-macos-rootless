@@ -8,7 +8,7 @@ echo "  It will remove any directories and file beginning with '$HOME/.nix-'."
 echo "  It is opinionated and does not provide adjusting the location of the store."
 echo "  It is provided as is and there may be unknown quirks."
 echo
-read -p "Continue, accepting the above? Press any key to confirm, or CTRL-C to quit." < /dev/tty
+read -p "Continue, accepting the above? Press Enter to confirm, or CTRL-C to quit." < /dev/tty
 
 remove_nix_dir() {
     echo "Removing $1 ..."
