@@ -2,16 +2,6 @@
 
 set -euo pipefail
 
-
-echo "This installation script enables rootless single-user nix installation on MacOS."
-echo "  It will install nix store within '$HOME/.local/share/nix'."
-echo "  It will use MacOS DYLD library insertion and create wrappers so the location of /nix/store can be faked for nix binaries."
-echo "  It will fetch official nix installation, patch it and then use it to install nix."
-echo "  It is opinionated and does not provide adjusting the location of the store."
-echo "  It is provided as is and there may be unknown quirks."
-echo
-read -p "Continue, accepting the above? Press any key to confirm, or CTRL-C to quit." < /dev/tty
-
 REQUIRED_COMMANDS=("curl" "make" "git" "tar" "otool" "install_name_tool" "codesign")
 COMMANDS_MISSING=
 
@@ -23,32 +13,6 @@ done
 
 LIBEXEC="$HOME/.local/share/nix/libexec"
 BINDIR="$HOME/.local/share/nix/bin"
-
-WORKDIR=$(mktemp -d)
-trap "rm -rf $WORKDIR" EXIT
-
-echo "Installation will proceed in $WORKDIR ..."
-
-cd "$WORKDIR"
-
-NIX_INSTALL_VERSION=${NIX_INSTALL_VERSION:-2.34.8}
-[[ "$(arch)" == "arm64" ]] && SYSTEM="aarch64-darwin" || SYSTEM=x86_64-darwin
-
-echo "Fetching nix install scripts ..."
-
-curl -sLO https://releases.nixos.org/nix/nix-$NIX_INSTALL_VERSION/nix-$NIX_INSTALL_VERSION-$SYSTEM.tar.xz
-tar xfj nix-$NIX_INSTALL_VERSION-$SYSTEM.tar.xz
-
-NIX_INSTALL_DIR="$WORKDIR/nix-$NIX_INSTALL_VERSION-$SYSTEM"
-
-echo "Fetching macos-rootless patches from branch nix/$NIX_INSTALL_VERSION in https://github.com/Sharsie/nix-macos-rootless.git ..."
-
-git clone --depth 1 --branch "nix/$NIX_INSTALL_VERSION" https://github.com/Sharsie/nix-macos-rootless.git nix-macos-rootless > /dev/null
-cp -R nix-macos-rootless/src/ "$NIX_INSTALL_DIR/"
-
-echo "Fetching fakedir from branch hotfix/rootless-nix-install in https://github.com/Sharsie/fakedir.git ..."
-
-git clone --depth 1 --branch hotfix/rootless-nix-install https://github.com/Sharsie/fakedir.git fakedir > /dev/null
 
 echo "Building fakedir ..."
 
@@ -257,11 +221,5 @@ echo "Running nix install with --no-daemon ..."
 echo "Patching nix installation ..."
 nix_rehash
 
-echo "==============================="
-echo "Installation complete."
-echo 'Please add the line'
-echo
-echo 'export PATH="'"$BINDIR"':$PATH"'
-echo
-echo 'to your shell profile (e.g. ~/.profile, ~/.zshrc, ~/.bashrc)'
-echo
+chmod +x "$NIX_INSTALL_DIR"/mac-rootless-postinstall.sh
+"$NIX_INSTALL_DIR"/mac-rootless-postinstall.sh

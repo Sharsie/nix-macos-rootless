@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+NIX_INSTALL_VERSION=${NIX_INSTALL_VERSION:-2.34.8}
+MACOS_ROOTLESS_BRANCH=${MACOS_ROOTLESS_BRANCH:-nix/$NIX_INSTALL_VERSION}
+FAKEDIR_BRANCH=${FAKEDIR_BRANCH:-hotfix/rootless-nix-install}
+
+echo "This installation script enables rootless single-user nix installation on MacOS."
+echo "  It will install nix store in '$HOME/.local/share/nix'."
+echo "  It will utilize MacOS DYLD - dynamic library insertion and create wrappers so the location of /nix/store can be faked for nix binaries."
+echo "  It will fetch official nix installation, patch it and then use it to install nix."
+echo "  It is opinionated and does not provide adjusting the location of the store."
+echo "  It is provided as is and there may be unknown quirks."
+echo "  Version ${NIX_INSTALL_VERSION} will be installed."
+echo
+read -p "Continue, accepting the above? Press Enter to confirm, or CTRL-C to quit." < /dev/tty
+
+
+WORKDIR=$(mktemp -d)
+trap "rm -rf $WORKDIR" EXIT
+
+echo "Installation will proceed in $WORKDIR ..."
+
+cd "$WORKDIR"
+
+[[ "$(arch)" == "arm64" ]] && SYSTEM="aarch64-darwin" || SYSTEM=x86_64-darwin
+
+echo "Fetching nix install scripts ..."
+
+curl -sLO https://releases.nixos.org/nix/nix-$NIX_INSTALL_VERSION/nix-$NIX_INSTALL_VERSION-$SYSTEM.tar.xz
+tar xfj nix-$NIX_INSTALL_VERSION-$SYSTEM.tar.xz
+
+echo "Fetching macos-rootless patches from https://github.com/Sharsie/nix-macos-rootless.git ..."
+
+if ! git clone --depth 1 --branch "$MACOS_ROOTLESS_BRANCH" https://github.com/Sharsie/nix-macos-rootless.git nix-macos-rootless > /dev/null; then
+    cat <<EOF
+The version '$NIX_INSTALL_VERSION' requested by you and you alone has not been tested with this installation script.
+I just want to make sure you realize you are on your own.
+The script will use the latest version from main branch.
+Good luck!
+
+EOF
+
+    read -p "Press Enter to confirm you are on your own and continue or CTRL-C to quit..."
+
+    git clone --depth 1 https://github.com/Sharsie/nix-macos-rootless.git nix-macos-rootless > /dev/null
+fi
+
+echo "Fetching fakedir from https://github.com/Sharsie/fakedir.git ..."
+
+git clone --depth 1 --branch "$FAKEDIR_BRANCH" https://github.com/Sharsie/fakedir.git fakedir > /dev/null
+
+# Used by the mac-rootless-install.sh
+export NIX_INSTALL_DIR="$WORKDIR/nix-$NIX_INSTALL_VERSION-$SYSTEM"
+
+cp -R nix-macos-rootless/src/ "$NIX_INSTALL_DIR/"
+
+chmod +x "$NIX_INSTALL_DIR"/mac-rootless-install.sh
+
+"$NIX_INSTALL_DIR"/mac-rootless-install.sh
