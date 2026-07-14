@@ -4,43 +4,45 @@ Nix on macOS. No daemon, no `/nix`, no `sudo`. Just you and your `$HOME`.
 
 If you can use sudo, don't use this. Seriously. Do multi-user install using sudo. Not everyone is that lucky.
 
-## One-liner install
+It fakes `/nix/store` into existence via `DYLD_INSERT_LIBRARIES` sorcery and
+installs everything into `$HOME/.local/share/nix`. Requires Xcode Command
+Line Tools (`xcode-select --install`).
+
+## Install
 
 ```sh
 curl -sL https://raw.githubusercontent.com/Sharsie/nix-macos-rootless/main/install | bash
 ```
 
-## One-liner uninstall
+The installer walks you through the important bits below (PATH, flakes,
+how it works) at the end — read it.
 
-Remove the `PATH` modifications from your shell profile.
+## Uninstall
 
 ```sh
 curl -sL https://raw.githubusercontent.com/Sharsie/nix-macos-rootless/main/uninstall | bash
 ```
 
+Then remove the `PATH` modifications from your shell profile.
+
 ## ⚠️ Add the wrapper dir to your PATH
 
-The install is useless until you do this. Once it finishes, it prints the
-exact line — but here it is anyway, add it to your .bashrc, .zshrc or whatever.
+The install is useless until you do this — add it to your `.bashrc`,
+`.zshrc`, or whatever profile file you use:
 
 ```sh
 export PATH="$HOME/.local/share/nix/bin:$PATH"
 ```
 
-That's it. It fakes `/nix/store` into existence via `DYLD_INSERT_LIBRARIES`
-sorcery and installs everything into `$HOME/.local/share/nix`.
+## ⚠️ Enable flakes
 
-Requires Xcode Command Line Tools (`xcode-select --install`).
-
-## Enable flakes
-
-This installer does not enable flakes and nix command by default.
-
-Add the following to `~/.config/nix/nix.conf`
+Not enabled by default. Add the following to `~/.config/nix/nix.conf`:
 
 ```
 experimental-features = nix-command flakes
 ```
+
+Note: This also enables nix command without having to provide `--extra-experimental-features` every time.
 
 ## Upgrading
 
@@ -72,14 +74,17 @@ thing, not this installer's; stick with `nix profile` from then on. It's the rig
 - This is a workaround, not an officially supported Nix install mode.
 - Store location is fixed to `$HOME/.local/share/nix` — not configurable.
 - Does not work with MacOS protected binaries. i.e. you can't just `ls /nix/store`. Replace paths, e.g. `ls $HOME/.local/share/nix/store`
-- Every time a global package is installed (`nix-env`) or profile updated (`nix profile`),
-  the wrapper symlinks in `$HOME/.local/share/nix/bin` are regenerated automatically —
-  but only when you invoke those commands through the wrappers (i.e. via the `PATH` entry
-  above). If you mutate the profile any other way (e.g. calling `nix-env` from inside a
-  `nix-shell`), new or removed commands won't be picked up until you run
-  `$HOME/.local/share/nix/libexec/rehash` yourself.
 
+## How it works
 
+Nix and everything installed through it still think they live at
+`/nix/store`. Wrapper scripts in `$HOME/.local/share/nix/bin` (the `PATH`
+entry above) launch binaries with that path rewritten to
+`$HOME/.local/share/nix` via DYLD injection — the binaries themselves never
+know. New/removed packages regenerate these wrappers automatically, but only
+when installed through them (`nix-env`, `nix profile`); other profile
+mutations (e.g. from inside a `nix-shell`) need a manual execution of
+`$HOME/.local/share/nix/libexec/rehash`.
 
 ## License
 
